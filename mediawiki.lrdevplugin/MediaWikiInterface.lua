@@ -128,41 +128,53 @@ MediaWikiInterface.addToGallery = function(fileNames, galleryName)
 	MediaWikiApi.appendToPage(galleryName, section, text, comment)
 end
 
-MediaWikiInterface.uploadFile = function(filePath, description, hasDescription, targetFileName)
+MediaWikiInterface.uploadFile = function(filePath, description, hasDescription, targetFileName, info_mode, updateCommentForAll)
 	if not MediaWikiInterface.loggedIn then
 		LrErrors.throwUserError(LOC "$$$/LrMediaWiki/Interface/Internal/NotLoggedIn=Internal error: not logged in before upload")
 	end
-	local comment = 'Uploaded with LrMediaWiki ' .. MediaWikiUtils.getVersionString()
+	local comment = 'Uploaded with LrMediaWiki ' .. MediaWikiUtils.getVersionString() -- for new files
+	local commentSuffix = ' (LrMediaWiki ' .. MediaWikiUtils.getVersionString() .. ')' -- for updates
 
 	local ignorewarnings = false
 	if MediaWikiApi.existsFile(targetFileName) then
-		local message = LOC "$$$/LrMediaWiki/Interface/InUse=File name already in use"
-		local info = LOC("$$$/LrMediaWiki/Interface/InUse/Details=There already is a file with the name ^1. Overwrite? (File description won’t be changed.)", targetFileName)
-		local actionVerb = LOC "$$$/LrMediaWiki/Interface/InUse/OK=Overwrite"
-		local cancelVerb = LOC "$$$/LrMediaWiki/Interface/InUse/Cancel=Cancel"
-		local otherVerb = LOC "$$$/LrMediaWiki/Interface/InUse/Rename=Rename"
-		local continue = LrDialogs.confirm(message, info, actionVerb, cancelVerb, otherVerb)
-		if continue == 'ok' then
-			local versionComment = LOC "$$$/LrMediaWiki/Interface/VersionComment=Version comment"
-			local newComment = MediaWikiInterface.prompt(versionComment, versionComment)
-			if MediaWikiUtils.isStringFilled(newComment) then
-				comment = newComment .. ' (LrMediaWiki ' .. MediaWikiUtils.getVersionString() .. ')'
+		if MediaWikiUtils.isStringEmpty(updateCommentForAll) then
+			local message = LOC "$$$/LrMediaWiki/Interface/InUse=File name already in use"
+			local info = LOC("$$$/LrMediaWiki/Interface/InUse/Details=There already is a file with the name ^1. Overwrite? (File description won’t be changed.)", targetFileName)
+			local actionVerb = LOC "$$$/LrMediaWiki/Interface/InUse/OK=Overwrite"
+			local cancelVerb = LOC "$$$/LrMediaWiki/Interface/InUse/Cancel=Cancel"
+			local otherVerb = LOC "$$$/LrMediaWiki/Interface/InUse/Rename=Rename"
+			local continue = LrDialogs.confirm(message, info, actionVerb, cancelVerb, otherVerb)
+			if continue == 'ok' then -- Overwrite
+				local versionComment = LOC "$$$/LrMediaWiki/Interface/VersionComment=Version comment"
+				local newComment = MediaWikiInterface.prompt(versionComment, versionComment)
+				if MediaWikiUtils.isStringFilled(newComment) then
+					comment = newComment .. commentSuffix
+				end
+				ignorewarnings = true
+			elseif continue == 'other' then -- Rename
+				local renameFile = LOC "$$$/LrMediaWiki/Interface/Rename=Rename file"
+				local newName = LOC "$$$/LrMediaWiki/Interface/Rename/NewName=New file name"
+				local newFileName = MediaWikiInterface.prompt(renameFile, newName, targetFileName)
+				if MediaWikiUtils.isStringFilled(newFileName) and newFileName ~= targetFileName then
+					MediaWikiInterface.uploadFile(filePath, description, hasDescription, newFileName, 'Standard')
+				end
+				return
+			else -- Cancel
+				return
 			end
+		else -- File exists, updateCommentForAll is filled, no interaction with user is needed, overwrite
+			assert(info_mode == 'UpdateOnly') -- updateCommentForAll is only filled if mode is UpdateOnly
+			comment = updateCommentForAll .. commentSuffix
 			ignorewarnings = true
-		elseif continue == 'other' then
-			local renameFile = LOC "$$$/LrMediaWiki/Interface/Rename=Rename file"
-			local newName = LOC "$$$/LrMediaWiki/Interface/Rename/NewName=New file name"
-			local newFileName = MediaWikiInterface.prompt(renameFile, newName, targetFileName)
-			if MediaWikiUtils.isStringFilled(newFileName) and newFileName ~= targetFileName then
-				MediaWikiInterface.uploadFile(filePath, description, hasDescription, newFileName)
-			end
-			return
-		else
-			return
 		end
-	else
+	else -- targetFileName exists not, the file is a new upload. New files need a description.
 		if not hasDescription then
 			return LOC "$$$/LrMediaWiki/Export/NoDescription=No description given for this file!"
+		end
+		if info_mode == 'UpdateOnly' then
+			LrDialogs.message(LOC "$$$/LrMediaWiki/Interface/NoUpload=Information: No upload of this new file in mode “Update only”",
+								LOC "$$$/LrMediaWiki/Interface/NoUploadFile=File" .. ': ' .. targetFileName)
+			return nil -- Don't upload if it's a new file
 		end
 	end
 	local uploadResult = MediaWikiApi.upload(targetFileName, filePath, description, comment, ignorewarnings)
@@ -173,7 +185,7 @@ MediaWikiInterface.uploadFile = function(filePath, description, hasDescription, 
 end
 
 MediaWikiInterface.buildFileDescription = function(exportFields, photo)
-	local categoriesString = ''
+		local categoriesList = {}
 	-- The following 2 calls of the Lua function "string.gmatch()" iterate the given strings
 	-- "categories" and "info_categories" by the pattern "[^;]+".
 	-- It separates all occurrences of categories (by using "+") without the character ";".
@@ -186,14 +198,31 @@ MediaWikiInterface.buildFileDescription = function(exportFields, photo)
 	for category in string.gmatch(exportFields.categories, '[^;]+') do
 		if category then
 			category = MediaWikiUtils.trim(category)
-			categoriesString = categoriesString .. string.format('[[Category:%s]]\n', category)
+			table.insert(categoriesList, category)
 		end
 	end
+
 	for category in string.gmatch(exportFields.info_categories, '[^;]+') do
 		if category then
 			category = MediaWikiUtils.trim(category)
-			categoriesString = categoriesString .. string.format('[[Category:%s]]\n', category)
+			table.insert(categoriesList, category)
 		end
+	end
+
+	-- remove duplicate categories, see https://stackoverflow.com/questions/20066835/lua-remove-duplicate-elements
+	local categoriesListTwo = {}
+	local hash = {}
+	for _,v in ipairs(categoriesList) do
+		if not hash[v] then
+			categoriesListTwo[#categoriesListTwo + 1] = v
+			hash[v] = true
+		end
+	end
+	local categoriesString = ''
+	local category
+	for i = 1, #categoriesListTwo do
+		category = string.format('[[Category:%s]]\n',  categoriesListTwo[i])
+		categoriesString = categoriesString .. category
 	end
 
 	local arguments = {
@@ -360,6 +389,24 @@ MediaWikiInterface.buildFileDescription = function(exportFields, photo)
 	arguments.creationMinute = ''
 	arguments.creationSecond = ''
 
+	local currentTime = LrDate.currentTime() -- number of seconds since midnight UTC on January 1, 2001
+	arguments.currentIsoDate = LrDate.timeToIsoDate(currentTime) -- 2021-01-09
+	arguments.currentLongDate = LrDate.formatLongDate(currentTime) -- 9. Januar 2021
+	arguments.currentMediumDate = LrDate.formatMediumDate(currentTime) -- 09.01.2021
+	arguments.currentShortDate = LrDate.formatShortDate(currentTime) -- 09.01.21
+	arguments.currentYear = LrDate.timeToUserFormat(currentTime, '%Y') -- 2021
+	arguments.currentYearXX = LrDate.timeToUserFormat(currentTime, '%y') -- 21
+	arguments.currentMonthXX = LrDate.timeToUserFormat(currentTime, '%m') -- 01
+	arguments.currentMonth = tonumber(arguments.currentMonthXX) -- 1
+	arguments.currentMonthName = LrDate.timeToUserFormat(currentTime, '%B') -- January
+	arguments.currentDayXX = LrDate.timeToUserFormat(currentTime, '%d') -- 09
+	arguments.currentDay = LrDate.timeToUserFormat(currentTime, '%e') -- 9
+	arguments.currentDayName = LrDate.timeToUserFormat(currentTime, '%A') -- Saturday
+	arguments.currentTime = LrDate.timeToUserFormat(currentTime, '%H:%M:%S') -- 20:40:15
+	arguments.currentHour = LrDate.timeToUserFormat(currentTime, '%H') -- 20
+	arguments.currentMinute = LrDate.timeToUserFormat(currentTime, '%M') -- 40
+	arguments.currentSecond = LrDate.timeToUserFormat(currentTime, '%S') -- 15
+
 	if arguments.dateCreated ~= '' then
 		local function getMonth(month)
 			local months = { 'January', 'February', 'March', 'April', 'May', 'June',
@@ -433,7 +480,21 @@ MediaWikiInterface.buildFileDescription = function(exportFields, photo)
 	-- local msg = 'Wikitext:\n' .. wikitext
 	-- MediaWikiUtils.trace(msg)
 
-	return wikitext
+	-- Search for placeholders which are not substituted by a filled variable.
+	-- A typical error is an empty variable.
+	-- Another error can be caused by a faulty placeholder name, e. g. <personsShown> instead of <personShown>,
+	local success
+	local placeholder = wikitext:match("<%a+>") -- a pattern starting with "<", multiple ASCII chars, ending with ">"
+	if placeholder then
+		message = LOC("$$$/LrMediaWiki/Interface/PlaceholderErrorMessage=The placeholder ^1 was not replaced.", placeholder)
+		local info = LOC("$$$/LrMediaWiki/Interface/PlaceholderErrorInfo=File: ^1", arguments.fileName)
+		LrDialogs.message(message, info, "critical")
+		success = false
+	else
+		success = true
+	end
+
+	return wikitext, success
 end
 
 return MediaWikiInterface

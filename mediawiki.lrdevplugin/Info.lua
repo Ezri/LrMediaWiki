@@ -37,8 +37,8 @@ return {
 	LrPluginInfoUrl = 'https://commons.wikimedia.org/wiki/Commons:LrMediaWiki',
 
 	VERSION = {
-		major = 0,
-		minor = 8,
-		revision = 0,
+		major = 1,
+		minor = 0,
+		revision = 2,
 	},
 }
